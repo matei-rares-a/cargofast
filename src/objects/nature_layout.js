@@ -451,3 +451,50 @@ export function buildNatureLayout({ manifest, heightAt, field }) {
   items.forEach((it) => { byTag[it.tag] = (byTag[it.tag] ?? 0) + 1; });
   return { items, stats: { total: items.length, byTag, trees: trees.length, models: new Set(items.map((i) => i.name)).size } };
 }
+
+// ---- manual (hand-edited) layout ----
+export const MANUAL_LAYOUT_VERSION = 1;
+const ROUND_POS = 2;    // decimals of x / z in the manual file (1 cm)
+const ROUND_ANGLE = 3;
+const ROUND_SCALE = 3;
+
+const round = (v, d) => Math.round(v * 10 ** d) / 10 ** d;
+
+/**
+ * Turn layout items into the JSON-friendly manual format. y is stored as `dy`, the offset from the terrain surface at (x, z),
+ * so a manual layout still follows the hills when they are regenerated.
+ * @return { version, items: [{ name, x, z, dy, rotY, scale, tag, collider }] }
+ */
+export function serializeLayout(items, heightAt) {
+  return {
+    version: MANUAL_LAYOUT_VERSION,
+    items: items.map((it) => {
+      const x = round(it.x, ROUND_POS);
+      const z = round(it.z, ROUND_POS);
+      const c = it.collider ? Object.fromEntries(Object.entries(it.collider).map(([k, v]) => [k, typeof v === 'number' ? round(v, 3) : v])) : null;
+      return { name: it.name, x, z, dy: round(it.y - heightAt(x, z), 3), rotY: round(it.rotY, ROUND_ANGLE), scale: round(it.scale, ROUND_SCALE), tag: it.tag, collider: c };
+    }),
+  };
+}
+
+/**
+ * Build the layout from a hand-edited file (same shape as `serializeLayout`). Optional per item: dy (default 0), rotY (0), scale (KIT_SCALE),
+ * tag ('prop'), collider (null = none; see the collider kinds in nature_kit.js). Throws on unknown models or non-numeric values.
+ * @return { items, stats } like `buildNatureLayout`
+ */
+export function layoutFromManual(data, { manifest, heightAt }) {
+  if (!data || !Array.isArray(data.items)) throw new Error('manual layout: expected { items: [...] }');
+  if (data.version !== undefined && data.version !== MANUAL_LAYOUT_VERSION) throw new Error(`manual layout: unsupported version ${data.version}`);
+  const info = new Map(manifest.map((m) => [m.name, m]));
+  const items = data.items.map((raw, i) => {
+    const m = info.get(raw.name);
+    if (!m) throw new Error(`manual layout: item ${i} has unknown model "${raw.name}"`);
+    const { x, z, dy = 0, rotY = 0, scale = KIT_SCALE, tag = 'prop', collider = null } = raw;
+    [x, z, dy, rotY, scale].forEach((v) => { if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`manual layout: item ${i} (${raw.name}) has a non-numeric value`); });
+    const y = heightAt(x, z) + dy;
+    return { name: raw.name, x, y, z, rotY, scale, collider, tag, top: y + m.max[1] * scale };
+  });
+  const byTag = {};
+  items.forEach((it) => { byTag[it.tag] = (byTag[it.tag] ?? 0) + 1; });
+  return { items, stats: { total: items.length, byTag, trees: byTag.tree ?? 0, models: new Set(items.map((i) => i.name)).size } };
+}

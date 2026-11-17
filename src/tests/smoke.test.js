@@ -3,7 +3,6 @@ import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { CubeObject } from '../objects/cubes';
 import { CarObject } from '../objects/car';
 import { RapierDebugRenderer } from '../objects/RapierDebugRenderer';
 import { createFakeGui, stubWindowKeys, createScene, runSteps, addGround, warmUpPhysics } from './helpers';
@@ -57,45 +56,6 @@ describe('physics world', () => {
     runSteps(world, 240);
 
     expect(body.translation().y).toBeCloseTo(0.5, 1);
-  });
-});
-
-describe('CubeObject', () => {
-  let press, world, cube;
-
-  beforeEach(() => {
-    press = stubWindowKeys();
-    world = new RAPIER.World({ x: 0, y: GRAVITY_Y, z: 0 });
-    addGround(RAPIER, world);
-    cube = new CubeObject(createScene(), world, createFakeGui());
-  });
-
-  test('creates a main cube with a mesh and a rigid body', () => {
-    expect(cube.mainCube.mesh).toBeInstanceOf(THREE.Mesh);
-    expect(cube.mainCube.rigidBody).toBeDefined();
-  });
-
-  test('W moves the cube toward -Z', () => {
-    press('keydown', 'KeyW');
-    const startZ = cube.mainCube.rigidBody.translation().z;
-    runSteps(world, 30, () => cube.update());
-    expect(cube.mainCube.rigidBody.translation().z).toBeLessThan(startZ - 0.5);
-  });
-
-  test('blocked input does not move the cube', () => {
-    cube.inputBlocked = true;
-    press('keydown', 'KeyW');
-    const startZ = cube.mainCube.rigidBody.translation().z;
-    runSteps(world, 30, () => cube.update());
-    expect(cube.mainCube.rigidBody.translation().z).toBeCloseTo(startZ, 1);
-  });
-
-  test('reset() returns the cube to its spawn point', () => {
-    const rb = cube.mainCube.rigidBody;
-    const spawn = { ...rb.translation() };
-    rb.setTranslation({ x: 10, y: 10, z: 10 }, true);
-    cube.reset();
-    expect(rb.translation()).toMatchObject(spawn);
   });
 });
 

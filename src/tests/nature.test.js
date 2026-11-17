@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, beforeEach } from 'vitest';
+import { describe, test, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { readFileSync } from 'node:fs';
@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Terrain } from '../objects/terrain';
 import { NatureKit } from '../objects/nature_kit';
-import { buildNatureLayout, KIT_SCALE, TREE_PATH_CLEAR, TREE_MIN_SPACING, PINE_PATH_CLEAR, BIG_ROCK_PATH_CLEAR, FAR_TREE_SPACING } from '../objects/nature_layout';
+import { buildNatureLayout, serializeLayout, layoutFromManual, KIT_SCALE, TREE_PATH_CLEAR, TREE_MIN_SPACING, PINE_PATH_CLEAR, BIG_ROCK_PATH_CLEAR, FAR_TREE_SPACING } from '../objects/nature_layout';
 import { CLEARING, MOUNTAIN, SUMMIT, BEACH, WATER_Y, SEA_EDGE_X, LOWLAND_Y, FAR_FOREST, distToPaths, landHeight, inFarForest } from '../objects/forest_map';
 import { MOUNTAIN_RING } from '../objects/scenery';
 import { createFakeGui, createScene, runSteps } from './helpers';
@@ -350,5 +350,148 @@ describe('NatureKit (real kit models)', () => {
   test('"Show Models" hides the whole kit', () => {
     kit.group.visible = false;
     expect(kit.group.visible).toBe(false);
+  });
+});
+
+describe('manual (hand-edited) layout', () => {
+  let world, terrain;
+  const heightAt = (x, z) => terrain.heightAt(x, z);
+  const generated = () => buildNatureLayout({ manifest, heightAt, field: terrain.bounds });
+  const oak = manifest.find((m) => m.name.startsWith('tree-oak')).name;
+  const rock = manifest.find((m) => m.name.startsWith('rock-large')).name;
+
+  beforeEach(() => {
+    ({ world, terrain } = makeWorld());
+  });
+
+  test('USE_MANUAL_LAYOUT is false by default (the generated layout is used)', () => {
+    const src = readFileSync(fileURLToPath(new URL('../objects/nature_kit.js', import.meta.url)), 'utf8');
+    expect(src).toMatch(/const USE_MANUAL_LAYOUT\s*=\s*false;/);
+    const kit = new NatureKit(createScene(), world, createFakeGui(), terrain, { manifest, loadModel });
+    expect(kit.settings.manualLayout).toBe(false);
+  });
+
+  test('the generated layout survives serialize -> manual load (same models, same places, same colliders)', () => {
+    const gen = generated();
+    const data = JSON.parse(JSON.stringify(serializeLayout(gen.items, heightAt))); // through real JSON, like the file
+    const back = layoutFromManual(data, { manifest, heightAt });
+    expect(back.items.length).toBe(gen.items.length);
+    gen.items.forEach((a, i) => {
+      const b = back.items[i];
+      expect(b.name).toBe(a.name);
+      expect(b.tag).toBe(a.tag);
+      expect(Math.abs(b.x - a.x)).toBeLessThanOrEqual(0.006);
+      expect(Math.abs(b.z - a.z)).toBeLessThanOrEqual(0.006);
+      expect(Math.abs(b.y - a.y)).toBeLessThan(0.03);
+      expect(Math.abs(b.scale - a.scale)).toBeLessThan(0.001);
+      expect(b.collider?.kind).toBe(a.collider?.kind);
+    });
+    expect(back.stats.total).toBe(gen.stats.total);
+  });
+
+  test('the shipped src/static/nature/layout.manual.json is a valid file that matches the generated layout it started from', () => {
+    const data = JSON.parse(readFileSync(`${NATURE_DIR}layout.manual.json`, 'utf8'));
+    const back = layoutFromManual(data, { manifest, heightAt });
+    expect(back.items.length).toBe(generated().items.length);
+  });
+
+  test('manual items follow the hills: they keep their offset from the terrain when it is regenerated', () => {
+    const data = { version: 1, items: [{ name: oak, x: -100, z: 30, dy: 0.5 }, { name: rock, x: -60, z: -30 }] };
+    terrain.settings.hillSeed += 7;
+    terrain.rebuild();
+    const [a, b] = layoutFromManual(data, { manifest, heightAt }).items;
+    expect(a.y).toBeCloseTo(terrain.heightAt(-100, 30) + 0.5, 6);
+    expect(b.y).toBeCloseTo(terrain.heightAt(-60, -30), 6);
+    expect([b.scale, b.rotY, b.tag, b.collider]).toEqual([KIT_SCALE, 0, 'prop', null]); // defaults for the optional fields
+  });
+
+  test('invalid files are rejected with a clear message (unknown model, non-numeric value, wrong version, no items)', () => {
+    const load = (d) => () => layoutFromManual(d, { manifest, heightAt });
+    expect(load({ items: [{ name: 'tree-nope', x: 0, z: 0 }] })).toThrow(/unknown model "tree-nope"/);
+    expect(load({ items: [{ name: oak, x: '1', z: 0 }] })).toThrow(/non-numeric/);
+    expect(load({ items: [{ name: oak, x: 0 }] })).toThrow(/non-numeric/);
+    expect(load({ version: 99, items: [] })).toThrow(/version/);
+    expect(load({})).toThrow(/items/);
+    expect(load(null)).toThrow(/items/);
+  });
+
+  describe('NatureKit', () => {
+    const FILE = {
+      version: 1,
+      items: [
+        { name: oak, x: -100, z: 30, rotY: 1, scale: 4, tag: 'tree', collider: { kind: 'cylinder', radius: 0.3, halfHeight: 0.6, centerY: 0.6 } },
+        { name: oak, x: -90, z: 30, tag: 'tree', collider: { kind: 'cylinder', radius: 0.3, halfHeight: 0.6, centerY: 0.6 } },
+        { name: rock, x: -80, z: 30, tag: 'rock' },
+      ],
+    };
+    const make = (opts) => new NatureKit(createScene(), world, createFakeGui(), terrain, { manifest, loadModel, ...opts });
+
+    test('with the flag on, only the items of the file exist (no generated forest), with their colliders', async () => {
+      const kit = make({ manualLayout: true, manualData: FILE });
+      await kit.load();
+      expect(kit.settings.manualLayout).toBe(true);
+      expect(kit.items.length).toBe(3);
+      expect(kit.meshes.size).toBe(2);
+      expect(kit.meshes.get(oak).count).toBe(2);
+      expect(kit.meshes.get(rock).count).toBe(1);
+      expect(kit.colliders.length).toBe(2); // the rock has no collider in the file
+      expect(kit.items[0].y).toBeCloseTo(terrain.heightAt(-100, 30), 6);
+    });
+
+    test('a manual layout is re-snapped to the regenerated hills without changing what is there', async () => {
+      const kit = make({ manualLayout: true, manualData: FILE });
+      await kit.load();
+      terrain.settings.hillSeed += 3;
+      terrain.rebuild();
+      expect(kit.items.length).toBe(3);
+      kit.items.forEach((it) => expect(it.y).toBeCloseTo(terrain.heightAt(it.x, it.z), 6));
+      expect(kit.colliders.length).toBe(2);
+    });
+
+    test('an unreadable or invalid file warns and falls back to the generated layout', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const kit = make({ manualLayout: true, manualData: { items: [{ name: 'tree-nope', x: 0, z: 0 }] } });
+      await kit.load();
+      expect(warn).toHaveBeenCalledOnce();
+      expect(kit.settings.manualLayout).toBe(false);
+      expect(kit.items.length).toBe(generated().items.length);
+      warn.mockRestore();
+    });
+
+    test('the current layout can be exported as a manual file that loads back (generated -> JSON text -> manual kit)', async () => {
+      const kit = make({});
+      await kit.load();
+      const text = kit.exportLayoutJson();
+      const data = JSON.parse(text);
+      expect(data.version).toBe(1);
+      expect(data.items.length).toBe(kit.items.length);
+      const manual = make({ manualLayout: true, manualData: data });
+      await manual.load();
+      expect(manual.items.length).toBe(kit.items.length);
+      expect(manual.meshes.size).toBe(kit.meshes.size);
+      expect(manual.colliders.length).toBe(kit.colliders.length);
+    }, 60000);
+
+    describe('GUI switch', () => {
+      afterEach(() => { delete globalThis.location; });
+
+      test('the checkbox reloads the page with ?layout=manual / generated (the URL parameter wins over the constant)', () => {
+        globalThis.location = { href: 'http://localhost:5173/index.html?warp=summit', search: '?warp=summit' };
+        const urls = [];
+        const kit = make({ navigate: (u) => urls.push(u) });
+        kit._switchLayout(true);
+        kit._switchLayout(false);
+        expect(urls[0]).toContain('layout=manual');
+        expect(urls[0]).toContain('warp=summit'); // other parameters are kept
+        expect(urls[1]).toContain('layout=generated');
+      });
+
+      test('?layout=manual in the URL turns the manual layout on, ?layout=generated turns it off', () => {
+        globalThis.location = { href: 'http://localhost/?layout=manual', search: '?layout=manual' };
+        expect(new NatureKit(createScene(), world, createFakeGui(), terrain, { manifest, loadModel }).settings.manualLayout).toBe(true);
+        globalThis.location = { href: 'http://localhost/?layout=generated', search: '?layout=generated' };
+        expect(new NatureKit(createScene(), world, createFakeGui(), terrain, { manifest, loadModel }).settings.manualLayout).toBe(false);
+      });
+    });
   });
 });

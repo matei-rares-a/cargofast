@@ -1,12 +1,11 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import RAPIER from '@dimforge/rapier3d-compat';
-import { CubeObject } from './objects/cubes';
-import { CarObject } from './objects/car';
+import { CarObject, CAR_UPSIDE_DOWN_UP_Y } from './objects/car';
 import {RapierDebugRenderer} from './objects/RapierDebugRenderer'
-import { Terrain } from './objects/terrain';
+import { Terrain, FIELD_CENTER, FIELD_SIZE } from './objects/terrain';
 import { Trails } from './objects/trails';
-import { CLEARING, BEACH, SUMMIT, CORRIDORS } from './objects/forest_map';
+import { CLEARING, BEACH, SUMMIT, CORRIDORS, SEABED_Y } from './objects/forest_map';
 import { Scenery } from './objects/scenery';
 import { NatureKit } from './objects/nature_kit';
 import { CoordinatePicker } from './objects/coordinate_picker';
@@ -22,6 +21,8 @@ const SCENE_BG_COLOR    = 0xd2f7ff;
 const GRAVITY_Y         = -20.81;
 const PLATFORM_THICKNESS = 0.5;   // half-height of the (hidden) original platforms
 const PLATFORM_FRICTION  = 0.5;
+// Base platform: a thin, flat, light-green slab under the whole forest map (terrain field + margin), below the sea floor
+const BASE_PLATFORM = { color: 0x9be37a, y: SEABED_Y - 3, halfThickness: 0.15, margin: 10 }; // y = center height; margin = meters beyond the terrain field on every side
 const FREE_CAM_SPEED    = 10.0;
 const FREE_CAM_SENS     = 0.002;
 const FREE_CAM_SPEED_RANGE   = { min: 1, max: 200 };         // GUI range of the free-fly speed (m/s)
@@ -51,6 +52,7 @@ const CAM_INIT_POS      = { x: 0, y: 12, z: -11 };
 const CAM_LERP          = 0.1;
 const CAM_OFFSET        = { ...CAM_INIT_POS };
 const CAM_TARGET_LERP   = 0.1;
+const CAM_UPSIDE_DOWN_MAX_POLAR = Math.PI / 2 - 0.05; // fixed mode: polar angle limit (from +Y) while upside down, keeps the camera above the car
 const CAM_SCROLL_STEP   = 1.5;
 const CAM_SCROLL_MIN    = 4;
 const CAM_SCROLL_MAX    = 60;
@@ -60,7 +62,7 @@ const LIGHT_POS         = { x: 5, y: 10, z: 4 };
 const FIXED_TIMESTEP    = 1 / 60;
 const MAX_DT            = 0.033;
 // --- Global camera settings ---
-const CAMERA_MODE = { mode: 'fixed' }; // 'follow' | 'fixed' | 'independent'
+const CAMERA_MODE = { mode: 'follow' }; // 'follow' | 'fixed' | 'independent'
 
 // Free-fly camera state
 const freeCam = {
@@ -120,7 +122,6 @@ camGui.add(CAMERA_MODE, 'mode', ['follow', 'fixed', 'independent']).name('mode')
   controls.enabled = (v === 'fixed');
   const blocked = (v === 'independent');
   CAR.inputBlocked  = blocked;
-  CUBES.inputBlocked = blocked;
   if (v !== 'independent' && document.pointerLockElement) document.exitPointerLock();
   if (v === 'independent') {
     freeCam.yaw   = Math.atan2(camera.getWorldDirection(new THREE.Vector3()).x,
@@ -152,8 +153,8 @@ const world = new RAPIER.World(gravity);
 
 // Original platforms and stairs (kept, but moved far under the map by PLATFORMS_DEPTH)
 const platformMeshes = [];
-function createPlatform(x, y, z, w, d, thick = PLATFORM_THICKNESS) {
-  const mat  = new THREE.MeshStandardMaterial({ color: PLATFORM_COLOR, metalness: 0.0, roughness: 1.0 });
+function createPlatform(x, y, z, w, d, thick = PLATFORM_THICKNESS, color = PLATFORM_COLOR) {
+  const mat  = new THREE.MeshStandardMaterial({ color, metalness: 0.0, roughness: 1.0 });
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, thick * 2, d), mat);
   mesh.position.set(x, y, z);
   mesh.receiveShadow = true;
@@ -165,9 +166,12 @@ function createPlatform(x, y, z, w, d, thick = PLATFORM_THICKNESS) {
     RAPIER.ColliderDesc.cuboid(w / 2, thick, d / 2).setFriction(PLATFORM_FRICTION),
     body
   );
+  return mesh;
 }
 PLATFORM_CONFIGS.forEach(({ x, y, z, w, d }) => createPlatform(x, y + PLATFORMS_DEPTH, z, w, d));
 STAIR_CONFIGS.forEach(({ x, y, z, w, d, t }) => createPlatform(x, y + PLATFORMS_DEPTH, z, w, d, t));
+const basePlatform = createPlatform(FIELD_CENTER.x, BASE_PLATFORM.y, FIELD_CENTER.z, FIELD_SIZE.x + 2 * BASE_PLATFORM.margin, FIELD_SIZE.z + 2 * BASE_PLATFORM.margin, BASE_PLATFORM.halfThickness, BASE_PLATFORM.color);
+basePlatform.material = new THREE.MeshBasicMaterial({ color: BASE_PLATFORM.color }); // unlit: stays light green even when seen from below (the sun only lights the top)
 
 // Handle resize
 // addEventListener('resize', () => {
@@ -184,9 +188,6 @@ const TRAILS = new Trails(scene, TERRAIN) // dirt paths: forest path with 3 exit
 const SCENERY = new Scenery(scene, world, gui) // fog, far land, mountains
 const NATURE = new NatureKit(scene, world, gui, TERRAIN) // Kenney Nature Kit: forest, flowers, rocks, cliffs, camp, pier...
 NATURE.load().catch((err) => console.error('Nature kit load error:', err)) // async: models pop in when ready
-const CUBES = new CubeObject(scene, world, gui)
-CUBES.inputBlocked = true; // disabled
-CUBES.mainCube.mesh.visible = false;
 const CAR   = new CarObject(scene, world, gui)
 const debugRenderer = new RapierDebugRenderer(scene, world, gui);
 
@@ -234,7 +235,6 @@ window.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.code === 'KeyR') {
     e.preventDefault();
     CAR.reset();
-    CUBES.reset();
   }
 });
 
@@ -259,7 +259,6 @@ function animate(now = performance.now()) {
   }
   //Use of objects--------------------------------------------
 
-  // CUBES.update(); // disabled
   CAR.update(dt);
   debugRenderer.update();
 
@@ -284,12 +283,20 @@ function animate(now = performance.now()) {
   } else if (carMesh) {
     if (CAMERA_MODE.mode === 'follow') {
       // Smooth follow behind the car
+      // Upside down (on its roof): follow only the heading, so the camera stays above the ground instead of rolling with the car
+      let followQuat = carMesh.quaternion;
+      if (new THREE.Vector3(0, 1, 0).applyQuaternion(carMesh.quaternion).y < CAR_UPSIDE_DOWN_UP_Y) {
+        const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(carMesh.quaternion);
+        followQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(fwd.x, fwd.z));
+      }
       const offset = new THREE.Vector3(camOffset.x, camOffset.y, camOffset.z);
-      offset.applyQuaternion(carMesh.quaternion);
+      offset.applyQuaternion(followQuat);
       camera.position.lerp(carMesh.position.clone().add(offset), CAM_LERP);
       camera.lookAt(carMesh.position);
     } else {
       // Fixed: OrbitControls active, keep target on car
+      const carUpY = new THREE.Vector3(0, 1, 0).applyQuaternion(carMesh.quaternion).y;
+      controls.maxPolarAngle = carUpY < CAR_UPSIDE_DOWN_UP_Y ? CAM_UPSIDE_DOWN_MAX_POLAR : Math.PI;
       controls.target.lerp(carMesh.position, CAM_TARGET_LERP);
       controls.update();
     }

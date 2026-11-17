@@ -14,6 +14,12 @@ const CHASSIS_H_FRAC      = 0.25;
 const CHASSIS_L_FRAC      = 0.75;
 const CHASSIS_OFFSET_Y    = 0.45;  // raise box so its bottom clears stair edges
 
+// Roof pad: a thin plate on top of the chassis box, wider than it. When the car lies on its roof the pad is the
+// surface that touches the ground, so the contact area is larger. It sits above the chassis, so driving upright is unchanged.
+const ROOF_PAD_W_FRAC     = 0.90;
+const ROOF_PAD_L_FRAC     = 0.90;
+const ROOF_PAD_THICK      = 0.05;  // m
+
 // *** VEHICLE CONTROLLER SETTINGS ***
 const ENGINE_FORCE        = 60.0;  // per-wheel force — keep low to avoid jumping
 const BRAKE_FORCE         = 1.5;  // gentle — prevents snap-stop bounce
@@ -26,6 +32,16 @@ const STEER_REDUCE_SPEED_END   = 14.0; // m/s where min steering factor is reach
 const STEER_MIN_FACTOR         = 0.35; // max speed steering = 35% of max steer angle
 const BRAKE_STEER_FACTOR       = 0.18; // keep slight steer visual while off-throttle
 const BRAKE_YAW_DAMP_RATE      = 18.0; // larger = stronger anti-spin yaw damping
+
+// Roof wobble: on its roof, A/D lean the car towards the pressed side. The lean is a damped pendulum that the
+// keys push, so pressing in step with the swing pumps it until the car tips over onto its side and falls.
+export const CAR_UPSIDE_DOWN_UP_Y = 0;    // car's up-axis y below this = the car lies on its roof
+const LEAN_STIFFNESS           = 40.0;  // 1/s^2, pull back towards flat; natural swing period ~1 s
+const LEAN_DAMPING             = 1.2;   // 1/s, energy loss: a lean dies out unless it is pushed
+const LEAN_PUSH                = 12.0;  // rad/s^2 per held key; holding alone leans ~17 deg (PUSH / STIFFNESS)
+const LEAN_SETTLE_EPS          = 0.01;  // rad and rad/s below which a lean counts as flat again (snap < 1 deg)
+const LEAN_START_MAX_SPEED     = 0.5;   // m/s and rad/s; the lean only starts from rest (not while falling)
+const LEAN_ROLL_SPEED          = 3.0;   // rad/s, roll speed from the tipping angle onto the wheels
 
 // Suspension
 const SUSP_STIFFNESS      = 25.0;
@@ -70,6 +86,10 @@ export class CarObject {
     this.wheelRadii     = [];  // physics radius per wheel
     this.frontCount     = 0;
     this.steerAngle     = 0;
+    this.chassisHalf    = null; // chassis collider half extents (set in loadCar)
+    this.collisionBoxes = null; // chassis + roof pad, see loadCar
+    this.roofContact    = null; // roof-side contact surface, see loadCar
+    this.rock           = { active: false, rolling: false, rollDir: 0, phi: 0, omega: 0, pose: null }; // roof lean state, see _startLean
     this.ready          = false;
     this.inputBlocked   = false;
     this.pressed        = {};
@@ -176,14 +196,30 @@ export class CarObject {
             .setAdditionalMass(8.0)  // heavier chassis = harder to flip/jump
         );
 
+        this.chassisHalf = {
+          x: size.x * CHASSIS_W_FRAC / 2,
+          y: size.y * CHASSIS_H_FRAC / 2,
+          z: size.z * CHASSIS_L_FRAC / 2,
+        };
         world.createCollider(
-          RAPIER.ColliderDesc.cuboid(
-            size.x * CHASSIS_W_FRAC / 2,
-            size.y * CHASSIS_H_FRAC / 2,
-            size.z * CHASSIS_L_FRAC / 2
-          ).setTranslation(0, CHASSIS_OFFSET_Y, 0).setRestitution(0.05),
+          RAPIER.ColliderDesc.cuboid(this.chassisHalf.x, this.chassisHalf.y, this.chassisHalf.z)
+            .setTranslation(0, CHASSIS_OFFSET_Y, 0).setRestitution(0.05),
           rigidBody
         );
+
+        const padHalf = { x: size.x * ROOF_PAD_W_FRAC / 2, y: ROOF_PAD_THICK / 2, z: size.z * ROOF_PAD_L_FRAC / 2 };
+        const padCentreY = CHASSIS_OFFSET_Y + this.chassisHalf.y + padHalf.y;
+        world.createCollider(
+          RAPIER.ColliderDesc.cuboid(padHalf.x, padHalf.y, padHalf.z)
+            .setTranslation(0, padCentreY, 0).setRestitution(0.05),
+          rigidBody
+        );
+        // Body collision boxes as {centreY, half} in body coordinates, and the roof-side contact surface
+        this.collisionBoxes = [
+          { centreY: CHASSIS_OFFSET_Y, half: this.chassisHalf },
+          { centreY: padCentreY, half: padHalf },
+        ];
+        this.roofContact = { x: padHalf.x, y: padCentreY + padHalf.y }; // half width, outer face height above the origin
 
         const vehicle = world.createVehicleController(rigidBody);
         vehicle.indexUpAxis      = 1;
@@ -231,6 +267,12 @@ export class CarObject {
 
     const throttleActive = fwd || back;
     const rb = this.car.rigidBody;
+
+    // On its roof the wheels cannot steer: A/D lean the car instead (the wheel update is skipped while leaning)
+    if (this.rock.active || (left !== right && this._canStartLean())) {
+      this._stepLean(dt, (right ? 1 : 0) - (left ? 1 : 0));
+      return;
+    }
 
     const engineForce = fwd ? this.settings.engineForce : back ? -this.settings.engineForce : 0;
     let brake = 0;
@@ -290,6 +332,153 @@ export class CarObject {
     }
 
     this.vehicle.updateVehicle(dt);
+  }
+
+  /** True when the car's up axis points below the horizon, i.e. the car lies on its roof. */
+  isUpsideDown() {
+    const r = this.car.rigidBody.rotation();
+    return new THREE.Vector3(0, 1, 0).applyQuaternion(new THREE.Quaternion(r.x, r.y, r.z, r.w)).y < CAR_UPSIDE_DOWN_UP_Y;
+  }
+
+  /** True when the car lies on its roof and is nearly at rest, so a roof lean may start. */
+  _canStartLean() {
+    if (!this.isUpsideDown()) return false;
+    const rb = this.car.rigidBody;
+    const lv = rb.linvel();
+    const av = rb.angvel();
+    return Math.hypot(lv.x, lv.y, lv.z) < LEAN_START_MAX_SPEED && Math.hypot(av.x, av.y, av.z) < LEAN_START_MAX_SPEED;
+  }
+
+  /**
+   * Capture the resting roof pose and the two pivot edges, and make the body kinematic.
+   * The lean is then placed by the pendulum: the solver would absorb small pushes against the ground.
+   */
+  _startLean() {
+    const rb = this.car.rigidBody;
+    const t = rb.translation();
+    const r = rb.rotation();
+    const o0 = new THREE.Vector3(t.x, t.y, t.z);
+    const q0 = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+    const axis = new THREE.Vector3(0, 0, 1).applyQuaternion(q0); // roll axis = car forward
+    const hx = this.roofContact.x; // pivot edges lie on the roof contact surface
+    const face = this.roofContact.y; // its outer face, measured from the body origin
+
+    // Pivot edge for one lean side: sideX = -1 is the car's right (lean right = D), +1 its left.
+    // sgn is the roll sign that lifts the opposite edge while the pivot edge stays on the ground.
+    // The centre of mass is not the body origin (chassis box and added mass), so measure the tip from the real one.
+    const com = rb.localCom();
+    const drop = face - com.y; // centre of mass to the roof-side face, along the body axis
+    const pivotSide = (sideX) => {
+      const pivot = new THREE.Vector3(sideX * hx, face, 0).applyQuaternion(q0).add(o0);
+      const far = new THREE.Vector3(-sideX * hx, face, 0).applyQuaternion(q0).add(o0);
+      const probe = new THREE.Quaternion().setFromAxisAngle(axis, 0.01);
+      const farAfter = far.clone().sub(pivot).applyQuaternion(probe).add(pivot);
+      return {
+        pivot,
+        sgn: farAfter.y > far.y ? 1 : -1,
+        tip: Math.atan2(Math.abs(sideX * hx - com.x), drop), // lean at which the centre of mass is over the pivot edge
+      };
+    };
+
+    this.rock.pose = { o0, q0, axis, right: pivotSide(-1), left: pivotSide(1) };
+    this.rock.active = true;
+    this.rock.rolling = false;
+    this.rock.phi = 0;
+    this.rock.omega = 0;
+    rb.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true);
+  }
+
+  /**
+   * One physics step of the roof lean: integrate the pendulum, then place, tip over or settle the body.
+   * @param dt    fixed physics step in seconds
+   * @param push  -1 (A), 0 (none) or +1 (D); D leans the car to its right
+   */
+  _stepLean(dt, push) {
+    if (!this.rock.active) this._startLean();
+    const rock = this.rock;
+
+    if (rock.rolling) {
+      rock.phi += rock.rollDir * LEAN_ROLL_SPEED * dt;
+      if (Math.abs(rock.phi) >= Math.PI) return this._finishRoll();
+      return this._placeLean(rock.phi);
+    }
+
+    const acc = -LEAN_STIFFNESS * rock.phi - LEAN_DAMPING * rock.omega + LEAN_PUSH * push;
+    rock.omega += acc * dt;
+    rock.phi += rock.omega * dt;
+
+    const side = rock.phi >= 0 ? rock.pose.right : rock.pose.left;
+    if (Math.abs(rock.phi) >= side.tip) {
+      // Past the balance point the centre of mass keeps falling: roll the rest of the way onto the wheels
+      rock.rolling = true;
+      rock.rollDir = Math.sign(rock.phi);
+      rock.omega = 0;
+      return this._placeLean(rock.phi);
+    }
+    if (push === 0 && Math.abs(rock.phi) < LEAN_SETTLE_EPS && Math.abs(rock.omega) < LEAN_SETTLE_EPS) return this._endLean();
+    this._placeLean(rock.phi);
+  }
+
+  /**
+   * Body pose at lean angle phi (rad, + = right): rolled about the pivot edge that stays on the ground.
+   * @returns {{o: THREE.Vector3, q: THREE.Quaternion, pivotY: number}} origin, rotation and ground height of the pivot
+   */
+  _leanPose(phi) {
+    const { o0, q0, axis, right, left } = this.rock.pose;
+    const side = phi >= 0 ? right : left;
+    const R = new THREE.Quaternion().setFromAxisAngle(axis, side.sgn * Math.abs(phi));
+    return {
+      o: o0.clone().sub(side.pivot).applyQuaternion(R).add(side.pivot),
+      q: R.clone().multiply(q0),
+      pivotY: side.pivot.y,
+    };
+  }
+
+  /** Put the kinematic body at lean angle phi. */
+  _placeLean(phi) {
+    const { o, q } = this._leanPose(phi);
+    const rb = this.car.rigidBody;
+    rb.setNextKinematicTranslation({ x: o.x, y: o.y, z: o.z });
+    rb.setNextKinematicRotation({ x: q.x, y: q.y, z: q.z, w: q.w });
+  }
+
+  /** Lowest world y of the body collision boxes (chassis and roof pad) in the pose (o, q). */
+  _lowestCornerY(o, q) {
+    let lowest = Infinity;
+    for (const { centreY, half } of this.collisionBoxes) {
+      for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+        const p = new THREE.Vector3(sx * half.x, centreY + sy * half.y, sz * half.z).applyQuaternion(q).add(o);
+        lowest = Math.min(lowest, p.y);
+      }
+    }
+    return lowest;
+  }
+
+  /** Rolled over onto the wheels: lift the body so its lowest corner touches the ground, then let the solver take over. */
+  _finishRoll() {
+    const { o, q, pivotY } = this._leanPose(Math.PI * this.rock.rollDir);
+    o.y += pivotY - this._lowestCornerY(o, q);
+    this._handToSolver(o, q);
+  }
+
+  /** Lean is flat again and no key is held: return the body to the solver at its resting roof pose. */
+  _endLean() {
+    const { o0, q0 } = this.rock.pose;
+    this._handToSolver(o0, q0);
+  }
+
+  /** Make the body dynamic again at pose (o, q) with no motion. */
+  _handToSolver(o, q) {
+    this.rock.active = false;
+    this.rock.rolling = false;
+    this.rock.phi = 0;
+    this.rock.omega = 0;
+    const rb = this.car.rigidBody;
+    rb.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+    rb.setTranslation({ x: o.x, y: o.y, z: o.z }, true);
+    rb.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+    rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
   }
 
   _animateWheels() {
@@ -356,6 +545,13 @@ export class CarObject {
 
   _clearMotion() {
     const rb = this.car.rigidBody;
+    if (this.rock.active) {
+      this.rock.active = false;
+      this.rock.rolling = false;
+      rb.setBodyType(RAPIER.RigidBodyType.Dynamic, true);
+    }
+    this.rock.phi = 0;
+    this.rock.omega = 0;
     rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
     rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
     this.coastTimer = COAST_STOP_TIME;

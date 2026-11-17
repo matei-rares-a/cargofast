@@ -2,7 +2,7 @@ import { describe, test, expect, beforeAll, beforeEach } from 'vitest';
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { Terrain, FIELD_CENTER, FIELD_SIZE } from '../objects/terrain';
 import { SEA_EDGE_X, WATER_Y, SEABED_Y, LOWLAND_Y, MOUNTAIN } from '../objects/forest_map';
 import { Scenery, SCENERY_CENTER, MOUNTAIN_COUNT, MOUNTAIN_RING } from '../objects/scenery';
@@ -194,5 +194,24 @@ describe('Scenery', () => {
       const gaps = angles.map((a, i) => (i === angles.length - 1 ? angles[0] + Math.PI * 2 - a : angles[i + 1] - a));
       expect(Math.max(...gaps)).toBeLessThan(Math.PI / 6);
     });
+  });
+});
+
+describe('script.js: cube removed, base platform under the forest map', () => {
+  test('the test cube is gone (no CubeObject, no CUBES, no cubes.js)', () => {
+    expect(SCRIPT_SRC).not.toMatch(/CubeObject|CUBES|objects\/cubes/);
+    expect(existsSync(fileURLToPath(new URL('../objects/cubes.js', import.meta.url)))).toBe(false);
+  });
+
+  test('a thin, flat, light-green platform lies under the whole terrain field, below the sea floor', () => {
+    const cfg = new Function('SEABED_Y', `return ${/const BASE_PLATFORM\s*=\s*(\{[^}]*\});/.exec(SCRIPT_SRC)[1]}`)(SEABED_Y);
+    const r = (cfg.color >> 16) & 255, g = (cfg.color >> 8) & 255, b = cfg.color & 255;
+    expect(g).toBeGreaterThan(200); // light
+    expect(g).toBeGreaterThan(r);
+    expect(g).toBeGreaterThan(b); // green
+    expect(cfg.halfThickness * 2).toBeLessThanOrEqual(0.5); // thin
+    expect(cfg.y + cfg.halfThickness).toBeLessThan(SEABED_Y); // under the sea floor
+    expect(cfg.margin).toBeGreaterThanOrEqual(0);
+    expect(SCRIPT_SRC).toContain('createPlatform(FIELD_CENTER.x, BASE_PLATFORM.y, FIELD_CENTER.z, FIELD_SIZE.x + 2 * BASE_PLATFORM.margin, FIELD_SIZE.z + 2 * BASE_PLATFORM.margin, BASE_PLATFORM.halfThickness, BASE_PLATFORM.color)');
   });
 });
