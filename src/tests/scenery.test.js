@@ -110,15 +110,15 @@ describe('Scenery', () => {
       expect(checked).toBeGreaterThan(10);
     });
 
-    test('the original light-green 40 x 40 ground plane is gone: a ball dropped at the start lands on the far land', () => {
-      const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(0, 5, 0));
+    test('the original light-green 40 x 40 ground plane is gone: a ball dropped east of the field lands on the far land', () => {
+      const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(100, 5, 0));
       world.createCollider(RAPIER.ColliderDesc.ball(0.5), body);
       runSteps(world, 180);
       expect(body.translation().y).toBeCloseTo(LOWLAND_Y + 0.5, 1);
     });
 
     test('has no hole any more: it is solid under where the cascade platforms used to hang', () => {
-      const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(27, 5, 7));
+      const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(100, 5, 7));
       world.createCollider(RAPIER.ColliderDesc.ball(0.5), body);
       runSteps(world, 180);
       expect(body.translation().y).toBeCloseTo(LOWLAND_Y + 0.5, 1);
@@ -156,7 +156,7 @@ describe('Scenery', () => {
         world.createCollider(RAPIER.ColliderDesc.ball(0.5), body);
         return body;
       };
-      const balls = [drop(0, 60), drop(0, -60), drop(80, 0), drop(150, 150)];
+      const balls = [drop(-60, 90), drop(-60, -90), drop(80, 0), drop(150, 150)]; // beyond the field's north, south and east edges
       runSteps(world, 180);
       balls.forEach((b) => expect(b.translation().y).toBeCloseTo(LOWLAND_Y + 0.5, 1));
     });

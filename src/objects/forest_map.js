@@ -3,14 +3,17 @@ import { smoothstep } from './noise';
 // *** FOREST MAP SETTINGS ***
 // Pure geometry of the western world (no three.js / Rapier): winding forest path with 3 exits
 // (clearing, sea, mountain), the mountain with a spiral trail to the summit, the sea basin.
-// All values are world units (x, z on the ground plane, y up). The grass field spans x -180..-20, z -80..80.
+// All values are world units (x, z on the ground plane, y up). The grass field spans x -180..60, z -80..80.
 export const PATH_WIDTH        = 8;     // forest path width
 export const TRAIL_WIDTH       = 8;     // mountain trail width (a drift off the ledge is easy to correct)
 export const PATH_SHOULDER     = 7;     // terrain blends back to natural over this distance beside a path
 export const TRAIL_SHOULDER    = 8;     // wider on the mountain: a gentler embankment on the downhill side
 const SAMPLE_STEP              = 2;     // meters between sampled path points
 
-export const ENTRANCE          = { x: -20, z: 0 };                                       // where the path meets the ground
+export const ENTRANCE          = { x: -6, z: 0 };                                        // where the path meets the start ground (the car spawns at x 0)
+export const START             = { x: 0, z: 0, rx: 9, rz: 9, feather: 8 };               // flat ground under the car at spawn
+export const MEADOW            = { x: 0, z: 40, rx: 12, rz: 34, feather: 8 };            // long oval test clearing in front of the car (no trees)
+export const BLUFF             = { x: -150, z: -26, radius: 5, falloff: 4, height: 5 };  // plateau above the sea; its west edge is the waterfall
 export const CLEARING          = { x: -62, z: 50, radius: 15, feather: 10 };             // clearing (poiana) with the camp
 export const BEACH             = { x: -160, z: 9 };                                      // end of the sea branch
 export const WATER_Y           = -1.2;  // sea surface
@@ -18,6 +21,8 @@ export const SEABED_Y          = -4;    // solid floor under the open sea (the c
 export const SEA_EDGE_X        = -176;  // west of this the far land ends and the open sea begins
 export const BASIN             = { startX: -148, length: 32, depth: 3.6 };               // terrain falls below water west of startX
 export const MOUNTAIN          = { x: -110, z: -40, radius: 34, height: 26 };            // smooth cone with a flat summit
+export const WATERFALL         = { x: BLUFF.x - BLUFF.radius, z: BLUFF.z, top: BLUFF.height, width: 5 }; // water falls from the bluff's west edge into the sea
+const OPEN_AREAS               = [CLEARING, START, MEADOW]; // flattened, tree-free ground
 const TRAIL_MAX_SLOPE          = 0.12;  // rise per meter of trail (about 6.8 degrees)
 const TRAIL_TOP_RADIUS         = 1.5;   // the spiral ends this far from the summit center
 const SUMMIT_PLATEAU           = 0.15;  // share of the radius that is perfectly flat on top (the viewpoint)
@@ -28,10 +33,15 @@ const TRAIL_DIRECTION          = 1;     // 1 = counter-clockwise seen from above
 
 // Hand-placed centerline waypoints of the forest paths (smoothed with a Catmull-Rom spline).
 const MAIN_WAYPOINTS = [
-  [-20, 0], [-30, 3], [-42, -4], [-54, 1], [-64, 9], [-76, 5], [-88, -1], [-98, -2], [-108, 6], [-118, 13], [-130, 10], [-142, 16], [-152, 12], [-160, 9],
+  [-6, 0], [-16, -6], [-26, -8], [-36, -3], [-42, -4], [-54, 1], [-64, 9], [-76, 5], [-88, -1], [-98, -2], [-108, 6], [-118, 13], [-130, 10], [-142, 16], [-152, 12], [-160, 9],
 ];
 const CLEARING_WAYPOINTS = [[-64, 9], [-62, 20], [-57, 31], [-58, 41], [-62, 50]];
 const ACCESS_JUNCTION    = [-98, -2];  // where the mountain branch leaves the main path (a point of MAIN_WAYPOINTS)
+const MEADOW_JUNCTION    = [-26, -8];  // where the branch to the oval meadow leaves the main path
+const BLUFF_JUNCTION     = [-130, 10]; // where the branch to the waterfall leaves the main path
+const MEADOW_WAYPOINTS   = [[-26, -8], [-14, -1], [-6, 4], [0, 8]];   // into the oval's south end
+const BLUFF_WAYPOINTS    = [[-130, 10], [-120, 4], [-118, -6], [-126, -14], [-136, -19], [-146, -22], [-150, -26]]; // winding climb to the plateau (about 60 m, gentle enough to drive)
+const BLUFF_FLAT_START   = 14;  // meters of level path at the bottom of the bluff climb
 
 /** Share of the way from the summit plateau edge (0) to the foot (1). */
 const flank = (r) => Math.min(1, Math.max(0, (r / MOUNTAIN.radius - SUMMIT_PLATEAU) / (1 - SUMMIT_PLATEAU)));
@@ -50,6 +60,12 @@ function mountainSlope(r) {
 export function basinHeight(x) {
   const u = Math.min(1, Math.max(0, (BASIN.startX - x) / BASIN.length));
   return -BASIN.depth * smoothstep(0, 1, u);
+}
+
+/** Bluff above the sea: a flat plateau with a steep falloff (its west edge is the waterfall). */
+export function bluffHeight(x, z) {
+  const r = Math.hypot(x - BLUFF.x, z - BLUFF.z);
+  return BLUFF.height * (1 - smoothstep(BLUFF.radius, BLUFF.radius + BLUFF.falloff, r));
 }
 
 /** Catmull-Rom spline through the waypoints, resampled every `step` meters. */
@@ -100,6 +116,16 @@ function buildTrail() {
 }
 
 const withY = (pts, yFn) => pts.map((p) => ({ x: p.x, z: p.z, y: yFn(p.x, p.z) }));
+/**
+ * Ramp a path up from the ground to `height` at a constant slope (the bluff path). The first BLUFF_FLAT_START meters stay
+ * level, so the ramp's shoulder does not lift the main path where the two meet.
+ */
+const climbing = (pts, height) => {
+  const s = [0];
+  for (let i = 1; i < pts.length; i++) s.push(s[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z));
+  const total = s[s.length - 1];
+  return pts.map((p, i) => ({ x: p.x, z: p.z, y: height * Math.min(1, Math.max(0, (s[i] - BLUFF_FLAT_START) / (total - BLUFF_FLAT_START))) }));
+};
 const startOfTrail = () => {
   const a = Math.atan2(ACCESS_JUNCTION[1] - MOUNTAIN.z, ACCESS_JUNCTION[0] - MOUNTAIN.x);
   return [MOUNTAIN.x + Math.cos(a) * MOUNTAIN.radius, MOUNTAIN.z + Math.sin(a) * MOUNTAIN.radius];
@@ -114,6 +140,8 @@ export const CORRIDORS = [
   { name: 'main', kind: 'path', halfWidth: PATH_WIDTH / 2, shoulder: PATH_SHOULDER, pts: withY(smoothPolyline(MAIN_WAYPOINTS, SAMPLE_STEP), (x) => basinHeight(x)) },
   { name: 'clearing', kind: 'path', halfWidth: PATH_WIDTH / 2, shoulder: PATH_SHOULDER, pts: withY(smoothPolyline(CLEARING_WAYPOINTS, SAMPLE_STEP), () => 0) },
   { name: 'access', kind: 'path', halfWidth: PATH_WIDTH / 2, shoulder: PATH_SHOULDER, pts: withY(smoothPolyline([ACCESS_JUNCTION, startOfTrail()], SAMPLE_STEP), () => 0) },
+  { name: 'meadow', kind: 'path', halfWidth: PATH_WIDTH / 2, shoulder: PATH_SHOULDER, pts: withY(smoothPolyline(MEADOW_WAYPOINTS, SAMPLE_STEP), () => 0) },
+  { name: 'bluff', kind: 'path', halfWidth: PATH_WIDTH / 2, shoulder: PATH_SHOULDER, pts: climbing(smoothPolyline(BLUFF_WAYPOINTS, SAMPLE_STEP), BLUFF.height) },
   { name: 'trail', kind: 'trail', halfWidth: TRAIL_WIDTH / 2, shoulder: TRAIL_SHOULDER, pts: TRAIL_POINTS },
 ];
 
@@ -165,14 +193,28 @@ export function carvePaths(natural, x, z) {
     if (n.dist >= reach) continue;
     h += (n.y - h) * (1 - smoothstep(c.halfWidth, reach, n.dist));
   }
-  const dc = Math.hypot(x - CLEARING.x, z - CLEARING.z);
-  if (dc < CLEARING.radius + CLEARING.feather) h += (0 - h) * (1 - smoothstep(CLEARING.radius, CLEARING.radius + CLEARING.feather, dc));
+  for (const a of OPEN_AREAS) {
+    const d = openAreaEdgeDist(a, x, z);
+    if (d < a.feather) h += (0 - h) * (1 - smoothstep(0, a.feather, d));
+  }
   return h;
+}
+
+/** Meters outside the edge of an open area (negative inside). Exact for circles, approximate for the ovals. */
+function openAreaEdgeDist(a, x, z) {
+  const rx = a.rx ?? a.radius;
+  const rz = a.rz ?? a.radius;
+  return (Math.hypot((x - a.x) / rx, (z - a.z) / rz) - 1) * Math.min(rx, rz);
+}
+
+/** Distance from (x, z) to the nearest open area (camp clearing, spawn ground, oval meadow): no trees there, the ground is flat. */
+export function openAreaDist(x, z) {
+  return Math.min(...OPEN_AREAS.map((a) => openAreaEdgeDist(a, x, z)));
 }
 
 /** Terrain height without the random meadow hills: what the layout uses for decisions (so hills never change what is placed where). */
 export function landHeight(x, z) {
-  return carvePaths(mountainHeight(x, z) + basinHeight(x), x, z);
+  return carvePaths(mountainHeight(x, z) + basinHeight(x) + bluffHeight(x, z), x, z);
 }
 
 /** Top of the flat lowland (far land) around the terrain field: exactly the field's base level, so the field edges (hills ramp to 0 there) meet it without a step. */
@@ -185,7 +227,7 @@ export const LOWLAND_Y = 0;
 export const FAR_FOREST = {
   center: { x: -60, z: 0 },
   radius: 240,
-  fieldMargin: 4,
+  fieldMargin: 0,   // the far forest starts right at the field edge: no gap between the two
   meadow: { minX: -30, maxX: 50, minZ: -50, maxZ: 50 },
   seaMargin: 6,
 };

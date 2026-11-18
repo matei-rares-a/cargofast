@@ -1,6 +1,6 @@
 import { seededRandom } from './noise';
 import {
-  CORRIDORS, CLEARING, MOUNTAIN, SUMMIT, BEACH, WATER_Y, BASIN, SEA_EDGE_X, PATH_WIDTH, TRAIL_WIDTH, LOWLAND_Y, FAR_FOREST, distToPaths, landHeight, inFarForest,
+  CORRIDORS, CLEARING, MOUNTAIN, SUMMIT, BEACH, WATER_Y, BASIN, SEA_EDGE_X, PATH_WIDTH, TRAIL_WIDTH, LOWLAND_Y, FAR_FOREST, distToPaths, openAreaDist, landHeight, inFarForest,
 } from './forest_map';
 
 // *** FOREST LAYOUT SETTINGS ***
@@ -8,11 +8,11 @@ import {
 // Decisions use landHeight (no random hills), so regenerating the hills only moves models up/down, never adds or removes them.
 export const KIT_SCALE         = 4;      // Kenney models are ~1 unit; x4 fits the car (2 x 4 m)
 const LAYOUT_SEED              = 17;
-const FIELD_MARGIN             = 5;      // keep this far from the field edges
-const SEAM_MARGIN              = 7;      // and this far from the ground edge (the entrance stays open)
+const FIELD_MARGIN             = 3;      // keep this far from the field edges (north / south)
+const SEAM_MARGIN              = 1;      // and this far from the east edge, where the far forest carries on without a gap
 
 // Trees
-export const TREE_COUNT        = 340;
+export const TREE_COUNT        = 800;    // about one tree per 49 m2 of the field, the same density as the far forest (FAR_TREE_SPACING 7 m)
 export const TREE_MIN_SPACING  = 5;
 export const TREE_PATH_CLEAR   = PATH_WIDTH / 2 + 4.5; // trees stay this far from any path centerline
 const TREE_CLEARING_GAP        = 4;      // and this far from the clearing edge
@@ -144,7 +144,6 @@ export function buildNatureLayout({ manifest, heightAt, field }) {
   const reserve = (x, z, r) => placed.push({ x, z, r });
   const isFree = (x, z, r) => placed.every((p) => Math.hypot(p.x - x, p.z - z) >= p.r + r);
   const inField = (x, z, m = FIELD_MARGIN) => x > field.minX + m && x < field.maxX - SEAM_MARGIN && z > field.minZ + m && z < field.maxZ - m;
-  const clearingDist = (x, z) => Math.hypot(x - CLEARING.x, z - CLEARING.z);
   const randomPoint = () => [field.minX + FIELD_MARGIN + rand() * (field.maxX - SEAM_MARGIN - field.minX - FIELD_MARGIN), field.minZ + FIELD_MARGIN + rand() * (field.maxZ - field.minZ - 2 * FIELD_MARGIN)];
   /** Find a free spot: accept(x, z, landH) is the caller's rule, r its footprint. Returns [x, z] or null. */
   const findSpot = (r, accept, attempts = 120) => {
@@ -279,7 +278,7 @@ export function buildNatureLayout({ manifest, heightAt, field }) {
     for (let k = 0; k < BIG_ROCK_COUNT; k++) {
       const foot = k < BIG_ROCK_COUNT / 2;
       const p = findSpot(3.5, (x, z, h) => {
-        if (!notWater(h) || clearingDist(x, z) < CLEARING.radius + 3 || distToPaths(x, z) < BIG_ROCK_PATH_CLEAR) return false;
+        if (!notWater(h) || openAreaDist(x, z) < 3 || distToPaths(x, z) < BIG_ROCK_PATH_CLEAR) return false;
         const d = Math.hypot(x - MOUNTAIN.x, z - MOUNTAIN.z) / MOUNTAIN.radius;
         return foot ? d > 0.85 && d < 1.5 : d > 1.5;
       }, 120);
@@ -288,7 +287,7 @@ export function buildNatureLayout({ manifest, heightAt, field }) {
       reserve(p[0], p[1], 3.5);
     }
     for (let k = 0; k < LARGE_ROCK_COUNT; k++) {
-      const p = findSpot(2.2, (x, z, h) => notWater(h) && clearingDist(x, z) > CLEARING.radius + 2 && distToPaths(x, z) > PATH_WIDTH / 2 + 2.5);
+      const p = findSpot(2.2, (x, z, h) => notWater(h) && openAreaDist(x, z) > 2 && distToPaths(x, z) > PATH_WIDTH / 2 + 2.5);
       if (!p) continue;
       put(nextLarge(), p[0], p[1], { rotY: rand() * 6.28, jitter: range(LARGE_ROCK_SCALE), collider: SOLID_HULL, tag: 'rock' });
       reserve(p[0], p[1], 2.2);
@@ -325,7 +324,7 @@ export function buildNatureLayout({ manifest, heightAt, field }) {
       put(nextConifer(), p[0], p[1], { rotY: rand() * Math.PI * 2, jitter: range(TREE_SCALE), collider: { kind: 'trunk' }, tag: 'pine' });
       reserve(p[0], p[1], PINE_SPACING / 2);
     }
-    const treeSpot = (x, z, h) => h >= WATER_Y + 1.2 && h <= TREE_MAX_ALTITUDE && x < field.maxX - 6 && distToPaths(x, z) >= TREE_PATH_CLEAR && clearingDist(x, z) > CLEARING.radius + TREE_CLEARING_GAP;
+    const treeSpot = (x, z, h) => h >= WATER_Y + 1.2 && h <= TREE_MAX_ALTITUDE && x < field.maxX - 3 && distToPaths(x, z) >= TREE_PATH_CLEAR && openAreaDist(x, z) > TREE_CLEARING_GAP;
     for (let k = 0; k < TREE_COUNT; k++) {
       const p = findSpot(TREE_MIN_SPACING / 2, treeSpot, 80);
       if (!p) continue;
@@ -354,7 +353,7 @@ export function buildNatureLayout({ manifest, heightAt, field }) {
     shuffle(trees.filter((t) => G.broadleaf.includes(t.name))).slice(0, MOSS_COUNT).forEach((t) => {
       put('hanging-moss', t.x + 0.4, t.z + 0.2, { baseY: t.y + (t.top - t.y) * 0.45, rotY: rand() * 6.28, jitter: 1.5, tag: 'moss' });
     });
-    const woodSpot = (x, z, h) => h > WATER_Y + 1.2 && h < TREE_MAX_ALTITUDE && distToPaths(x, z) > PATH_WIDTH / 2 + 2.5 && clearingDist(x, z) > CLEARING.radius + 2;
+    const woodSpot = (x, z, h) => h > WATER_Y + 1.2 && h < TREE_MAX_ALTITUDE && distToPaths(x, z) > PATH_WIDTH / 2 + 2.5 && openAreaDist(x, z) > 2;
     const nextStump = cycler(G.stump);
     for (let k = 0; k < STUMP_COUNT; k++) {
       const p = findSpot(1.2, woodSpot, 150);
@@ -382,7 +381,7 @@ export function buildNatureLayout({ manifest, heightAt, field }) {
     for (let k = 0; k < PATCH_COUNT * 6 && patches.length < PATCH_COUNT; k++) {
       const [x, z] = randomPoint();
       const h = landHeight(x, z);
-      if (h < 0.2 || h > 9 || distToPaths(x, z) < PATH_WIDTH / 2 + 1.5 || clearingDist(x, z) < CLEARING.radius + 2) continue;
+      if ((h < 0.2 && x < BASIN.startX + 12) || h > 9 || x > field.maxX - PATCH_RADIUS - 1 || distToPaths(x, z) < PATH_WIDTH / 2 + 1.5 || openAreaDist(x, z) < 2) continue; // no flowers on the beach, but flat meadow is fine
       if (patches.some((p) => Math.hypot(p[0] - x, p[1] - z) < PATCH_RADIUS * 1.2)) continue;
       patches.push([x, z]);
       const a = nextFlower();
@@ -407,7 +406,7 @@ export function buildNatureLayout({ manifest, heightAt, field }) {
     }
     for (let k = 0; k < SMALL_ROCK_COUNT; k++) {
       const [x, z] = randomPoint();
-      if (landHeight(x, z) <= WATER_Y + 0.8 || distToPaths(x, z) < PATH_WIDTH / 2 + 1 || !clearOfSolids(x, z)) continue;
+      if (landHeight(x, z) <= WATER_Y + 0.8 || distToPaths(x, z) < PATH_WIDTH / 2 + 1 || openAreaDist(x, z) < 2 || !clearOfSolids(x, z)) continue;
       put(nextSmall(), x, z, { rotY: rand() * 6.28, jitter: range(SMALL_ROCK_SCALE), tag: 'smallrock' });
     }
   }

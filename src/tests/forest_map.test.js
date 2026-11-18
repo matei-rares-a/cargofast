@@ -4,7 +4,7 @@ import {
   mountainHeight, basinHeight, distToPaths, landHeight, nearestOnCorridor,
 } from '../objects/forest_map';
 
-const FIELD = { minX: -180, maxX: -20, minZ: -80, maxZ: 80 };
+const FIELD = { minX: -180, maxX: 60, minZ: -80, maxZ: 80 };
 const corridor = (name) => CORRIDORS.find((c) => c.name === name);
 const first = (c) => c.pts[0];
 const last = (c) => c.pts[c.pts.length - 1];

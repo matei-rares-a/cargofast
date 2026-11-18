@@ -4,8 +4,10 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { CarObject, CAR_UPSIDE_DOWN_UP_Y } from './objects/car';
 import {RapierDebugRenderer} from './objects/RapierDebugRenderer'
 import { Terrain, FIELD_CENTER, FIELD_SIZE } from './objects/terrain';
+import { Waterfall } from './objects/waterfall';
+import { Compass } from './objects/compass';
 import { Trails } from './objects/trails';
-import { CLEARING, BEACH, SUMMIT, CORRIDORS, SEABED_Y } from './objects/forest_map';
+import { CLEARING, BEACH, SUMMIT, CORRIDORS, SEABED_Y, MEADOW, BLUFF } from './objects/forest_map';
 import { Scenery } from './objects/scenery';
 import { NatureKit } from './objects/nature_kit';
 import { CoordinatePicker } from './objects/coordinate_picker';
@@ -62,7 +64,7 @@ const LIGHT_POS         = { x: 5, y: 10, z: 4 };
 const FIXED_TIMESTEP    = 1 / 60;
 const MAX_DT            = 0.033;
 // --- Global camera settings ---
-const CAMERA_MODE = { mode: 'follow' }; // 'follow' | 'fixed' | 'independent'
+const CAMERA_MODE = { mode: 'independent' }; // 'follow' | 'fixed' | 'independent'
 
 // Free-fly camera state
 const freeCam = {
@@ -114,14 +116,17 @@ camera.position.set(CAM_INIT_POS.x, CAM_INIT_POS.y, CAM_INIT_POS.z);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
-controls.enabled = true; // 'fixed' is the default mode
+
 
 const camOffset = { x: CAM_OFFSET.x, y: CAM_OFFSET.y, z: CAM_OFFSET.z };
 const camGui = gui.addFolder('Camera');
+/** Camera mode: OrbitControls only in 'fixed'; the car ignores the keys in 'independent' (WASD / Space / Shift move the camera). */
+function applyCameraMode(mode) {
+  controls.enabled = (mode === 'fixed');
+  CAR.inputBlocked = (mode === 'independent');
+}
 camGui.add(CAMERA_MODE, 'mode', ['follow', 'fixed', 'independent']).name('mode').onChange((v) => {
-  controls.enabled = (v === 'fixed');
-  const blocked = (v === 'independent');
-  CAR.inputBlocked  = blocked;
+  applyCameraMode(v);
   if (v !== 'independent' && document.pointerLockElement) document.exitPointerLock();
   if (v === 'independent') {
     freeCam.yaw   = Math.atan2(camera.getWorldDirection(new THREE.Vector3()).x,
@@ -184,11 +189,13 @@ basePlatform.material = new THREE.MeshBasicMaterial({ color: BASE_PLATFORM.color
 //Declaration of objects--------------------------------------
 
 const TERRAIN = new Terrain(scene, world, gui) // forest terrain west of the start area (x < -20): meadow hills, mountain, sea basin
-const TRAILS = new Trails(scene, TERRAIN) // dirt paths: forest path with 3 exits (clearing, sea, mountain) + mountain trail
+const WATERFALL = new Waterfall(scene, TERRAIN) // water falling from the bluff into the sea, at the end of the bluff branch
+const TRAILS = new Trails(scene, TERRAIN) // dirt paths: forest path with its branches (camp, sea, mountain, oval meadow, waterfall) + mountain trail
 const SCENERY = new Scenery(scene, world, gui) // fog, far land, mountains
 const NATURE = new NatureKit(scene, world, gui, TERRAIN) // Kenney Nature Kit: forest, flowers, rocks, cliffs, camp, pier...
 NATURE.load().catch((err) => console.error('Nature kit load error:', err)) // async: models pop in when ready
 const CAR   = new CarObject(scene, world, gui)
+applyCameraMode(CAMERA_MODE.mode); // startup: the car must follow the mode too (the default can be 'independent')
 const debugRenderer = new RapierDebugRenderer(scene, world, gui);
 
 // Warp: jump to the points of interest of the forest map (GUI > Warp)
@@ -200,6 +207,8 @@ const WARP_CAM_BEHIND  = 11;  // camera distance behind the car after a warp (sa
 const WARP_CAM_HEIGHT  = 12;
 const WARPS = {
   entrance: { label: 'Entrance',        x: 0, z: 0, yaw: 0 },
+  meadow:   { label: 'Oval meadow',     x: MEADOW.x, z: MEADOW.z - 25, yaw: 0 },
+  waterfall: { label: 'Waterfall (sea)', x: BLUFF.x + 2, z: BLUFF.z, yaw: -Math.PI / 2 },
   clearing: { label: 'Clearing (camp)', x: CLEARING.x, z: CLEARING.z - 12, yaw: 0 },
   beach:    { label: 'Beach (sea)',     x: BEACH.x + 6, z: BEACH.z, yaw: -Math.PI / 2 },
   foot:     { label: 'Mountain foot',   x: trailStart.x, z: trailStart.z, yaw: trailYaw },
@@ -238,6 +247,8 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+
+const COMPASS = new Compass(); // top-left: needle = where the camera looks, ring = world N / E / S / W
 
 // --- Animation loop with fixed-step accumulator ---
 let last = performance.now();
@@ -304,6 +315,7 @@ function animate(now = performance.now()) {
 
   //End of main function---------------------------------------
   PICKER.update(); // keep the pin labels on their pins
+  COMPASS.update(camera); // heading of the camera on the compass
   renderer.render(scene, camera);
 }
 animate();

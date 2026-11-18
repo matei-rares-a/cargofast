@@ -30,17 +30,18 @@ const COAST_STOP_TIME     = 1.5;  // seconds from throttle release to full stop
 const STEER_REDUCE_SPEED_START = 4.0;  // m/s where steering starts to reduce
 const STEER_REDUCE_SPEED_END   = 14.0; // m/s where min steering factor is reached
 const STEER_MIN_FACTOR         = 0.35; // max speed steering = 35% of max steer angle
-const BRAKE_STEER_FACTOR       = 0.18; // keep slight steer visual while off-throttle
 const BRAKE_YAW_DAMP_RATE      = 18.0; // larger = stronger anti-spin yaw damping
+const COAST_LATERAL_DAMP       = 4.0;  // 1/s, how fast the sideways slide fades while coasting
 
 // Roof wobble: on its roof, A/D lean the car towards the pressed side. The lean is a damped pendulum that the
 // keys push, so pressing in step with the swing pumps it until the car tips over onto its side and falls.
 export const CAR_UPSIDE_DOWN_UP_Y = 0;    // car's up-axis y below this = the car lies on its roof
 const LEAN_STIFFNESS           = 40.0;  // 1/s^2, pull back towards flat; natural swing period ~1 s
 const LEAN_DAMPING             = 1.2;   // 1/s, energy loss: a lean dies out unless it is pushed
-const LEAN_PUSH                = 12.0;  // rad/s^2 per held key; holding alone leans ~17 deg (PUSH / STIFFNESS)
+const LEAN_PUSH                = 24.0;  // rad/s^2 per held key or press; holding alone leans ~34 deg (PUSH / STIFFNESS)
 const LEAN_SETTLE_EPS          = 0.01;  // rad and rad/s below which a lean counts as flat again (snap < 1 deg)
 const LEAN_START_MAX_SPEED     = 0.5;   // m/s and rad/s; the lean only starts from rest (not while falling)
+const LEAN_PULSE_TIME          = 0.5;   // s of push given by each new A/D press, so a tap is enough
 const LEAN_ROLL_SPEED          = 3.0;   // rad/s, roll speed from the tipping angle onto the wheels
 
 // Suspension
@@ -78,7 +79,7 @@ export class CarObject {
     this.bodyLiftCurrent = 0;  // smoothed body Z offset
     this.bodyPitchCurrent = 0; // smoothed body X rotation
     this.coastTimer = COAST_STOP_TIME;
-    this.coastStartVel = new THREE.Vector3();
+    this.coastStartSpeed = 0; // forward speed when the throttle was released
     this.wasThrottle = false;
     this.wheelMeshes = { front: [], rear: [] };
     this.wheelPivots    = [];
@@ -88,6 +89,8 @@ export class CarObject {
     this.steerAngle     = 0;
     this.chassisHalf    = null; // chassis collider half extents (set in loadCar)
     this.collisionBoxes = null; // chassis + roof pad, see loadCar
+    this.lastPress      = 0;    // A/D direction last frame: -1, 0 or +1
+    this.pulse          = { dir: 0, time: 0 }; // short push started by a new press, seconds left
     this.roofContact    = null; // roof-side contact surface, see loadCar
     this.rock           = { active: false, rolling: false, rollDir: 0, phi: 0, omega: 0, pose: null }; // roof lean state, see _startLean
     this.ready          = false;
@@ -268,11 +271,21 @@ export class CarObject {
     const throttleActive = fwd || back;
     const rb = this.car.rigidBody;
 
-    // On its roof the wheels cannot steer: A/D lean the car instead (the wheel update is skipped while leaning)
-    if (this.rock.active || (left !== right && this._canStartLean())) {
-      this._stepLean(dt, (right ? 1 : 0) - (left ? 1 : 0));
+    // On its roof the wheels cannot steer: A/D lean the car instead (the wheel update is skipped while leaning).
+    // Every new press starts a short push, so a quick tap is enough; holding a key keeps pushing.
+    const press = (right ? 1 : 0) - (left ? 1 : 0);
+    if (press !== 0 && press !== this.lastPress) this.pulse = { dir: press, time: LEAN_PULSE_TIME };
+    this.lastPress = press;
+    if (this.rock.active || (press !== 0 && this._canStartLean())) {
+      let push = press;
+      if (this.pulse.time > 0) {
+        push = this.pulse.dir;
+        this.pulse.time -= dt;
+      }
+      this._stepLean(dt, push);
       return;
     }
+    this.pulse.time = 0;
 
     const engineForce = fwd ? this.settings.engineForce : back ? -this.settings.engineForce : 0;
     let brake = 0;
@@ -282,20 +295,28 @@ export class CarObject {
       this.wasThrottle = true;
       this.coastTimer = 0;
     } else {
+      const fwd = this._forwardXZ();
       if (this.wasThrottle) {
         const lv = rb.linvel();
-        this.coastStartVel.set(lv.x, 0, lv.z);
+        this.coastStartSpeed = lv.x * fwd.x + lv.z * fwd.z; // speed along the heading at release
         this.coastTimer = 0;
         this.wasThrottle = false;
       }
 
       this.coastTimer = Math.min(COAST_STOP_TIME, this.coastTimer + dt);
       const k = 1 - (this.coastTimer / COAST_STOP_TIME);
+      // Fade only the speed along the current heading, and damp the sideways slide. The velocity then follows
+      // the heading, so steering still turns the car while it coasts.
       const lv = rb.linvel();
+      const along = lv.x * fwd.x + lv.z * fwd.z;
+      const sideDamp = Math.exp(-COAST_LATERAL_DAMP * dt);
+      const sideX = (lv.x - fwd.x * along) * sideDamp;
+      const sideZ = (lv.z - fwd.z * along) * sideDamp;
+      const speed = this.coastStartSpeed * k;
       rb.setLinvel({
-        x: this.coastStartVel.x * k,
+        x: fwd.x * speed + sideX,
         y: lv.y,
-        z: this.coastStartVel.z * k,
+        z: fwd.z * speed + sideZ,
       }, true);
 
       if (this.coastTimer >= COAST_STOP_TIME) {
@@ -315,8 +336,8 @@ export class CarObject {
     const targetSteer = (left || right) ? (left ? 1 : -1) * steerAtSpeed : 0;
     this.steerAngle  += (targetSteer - this.steerAngle) * STEER_SMOOTHING;
 
-    // Prevent spin-outs when braking/coasting while steering.
-    const physicsSteer = throttleActive ? this.steerAngle : this.steerAngle * BRAKE_STEER_FACTOR;
+    // Steering works the same while coasting as while driving; the yaw damping below limits spin-outs.
+    const physicsSteer = this.steerAngle;
     if (!throttleActive) {
       const av = rb.angvel();
       const yawKeep = Math.exp(-BRAKE_YAW_DAMP_RATE * dt);
@@ -332,6 +353,14 @@ export class CarObject {
     }
 
     this.vehicle.updateVehicle(dt);
+  }
+
+  /** Unit vector of the car's heading (its forward axis) projected on the ground plane. */
+  _forwardXZ() {
+    const r = this.car.rigidBody.rotation();
+    const f = new THREE.Vector3(0, 0, 1).applyQuaternion(new THREE.Quaternion(r.x, r.y, r.z, r.w));
+    f.y = 0;
+    return f.lengthSq() > 1e-8 ? f.normalize() : new THREE.Vector3(0, 0, 1);
   }
 
   /** True when the car's up axis points below the horizon, i.e. the car lies on its roof. */
@@ -555,7 +584,7 @@ export class CarObject {
     rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
     rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
     this.coastTimer = COAST_STOP_TIME;
-    this.coastStartVel.set(0, 0, 0);
+    this.coastStartSpeed = 0;
     this.wasThrottle = false;
     this.bodyLiftCurrent = 0;
     this.bodyPitchCurrent = 0;

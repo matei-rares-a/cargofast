@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { Terrain, FIELD_CENTER, FIELD_SIZE } from '../objects/terrain';
 import { Trails } from '../objects/trails';
-import { CORRIDORS, MOUNTAIN, SUMMIT, BEACH, WATER_Y, BASIN, CLEARING, ENTRANCE, LOWLAND_Y } from '../objects/forest_map';
+import { CORRIDORS, MOUNTAIN, SUMMIT, BEACH, WATER_Y, BASIN, CLEARING, START, LOWLAND_Y } from '../objects/forest_map';
 import { CarObject } from '../objects/car';
 import { createFakeGui, stubWindowKeys, createScene, runSteps, addGround, warmUpPhysics } from './helpers';
 
@@ -49,16 +49,16 @@ describe('Terrain', () => {
     expect(terrain.ground.geometry.attributes.color.count).toBe(terrain.ground.geometry.attributes.position.count);
   });
 
-  test('the field edge is the entrance line x = -20, flush with the start area', () => {
-    expect(FIELD_CENTER.x + FIELD_SIZE.x / 2).toBeCloseTo(ENTRANCE.x);
+  test('the field edge lies east of the start ground, so the spawn is on the terrain', () => {
+    expect(FIELD_CENTER.x + FIELD_SIZE.x / 2).toBeGreaterThan(START.x + START.rx + START.feather);
     expect(FIELD_CENTER.y).toBe(LOWLAND_Y); // the surrounding far land is at the same level
     const src = readFileSync(fileURLToPath(new URL('../script.js', import.meta.url)), 'utf8');
     expect(src).not.toMatch(/GROUND_SIZE|GROUND_COLOR/); // the original light-green ground plane is gone
     expect(src).not.toMatch(/PlaneGeometry\(GROUND/);
   });
 
-  test('the field is flat where it meets the ground (the entrance)', () => {
-    for (let z = -30; z <= 30; z += 5) expect(terrain.heightAt(-20.01, z)).toBeCloseTo(FIELD_CENTER.y, 5);
+  test('the field is flat under the start ground (spawn and entrance)', () => {
+    for (let x = -5; x <= 5; x += 2.5) for (let z = -5; z <= 5; z += 2.5) expect(terrain.heightAt(x, z)).toBeCloseTo(FIELD_CENTER.y, 5);
   });
 
   test('the physics heightfield matches the terrain function everywhere (axes not swapped)', () => {
@@ -101,7 +101,8 @@ describe('Terrain', () => {
 
   describe('paths', () => {
     test('every path is flat across its width, even where meadow hills would be', () => {
-      CORRIDORS.filter((c) => c.kind === 'path').forEach((c) => {
+      // the bluff path climbs on purpose (a ramp), so only the level paths are checked here
+      CORRIDORS.filter((c) => c.kind === 'path' && c.name !== 'bluff').forEach((c) => {
         for (let i = 2; i < c.pts.length - 2; i += 3) {
           const a = c.pts[i - 1];
           const b = c.pts[i + 1];

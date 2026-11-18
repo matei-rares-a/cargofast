@@ -314,8 +314,8 @@ describe('NatureKit (real kit models)', () => {
 
   test('a ball rolled into a tree trunk is stopped by it', () => {
     world.step();
-    const t = kit.items.find((i) => i.tag === 'tree');
-    const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(t.x - 4, t.y + 1.2, t.z).setLinvel(8, 0, 0).setGravityScale(0));
+    const t = kit.items.find((i) => i.tag === 'tree' && i.collider);
+    const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(t.x - 4, t.y + t.collider.centerY, t.z).setLinvel(8, 0, 0).setGravityScale(0)); // at the trunk's middle (small trees are short)
     world.createCollider(RAPIER.ColliderDesc.ball(0.3), body);
     runSteps(world, 120);
     expect(body.translation().x).toBeLessThan(t.x);

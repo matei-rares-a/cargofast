@@ -148,7 +148,11 @@ export class Scenery {
     ];
     const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
     // seabed under the open sea: the car can wade in but never falls forever
-    world.createCollider(RAPIER.ColliderDesc.cuboid(S, FAR_LAND_THICKNESS, S).setTranslation(SEA_EDGE_X - S, SEABED_Y - FAR_LAND_THICKNESS, 0).setFriction(FAR_LAND_FRICTION), body);
+    // It reaches east to SEA_EAST_X (where the water surface ends), so the water beyond the field's north and south edges has a floor too.
+    // Inside the field the terrain stays above it (the basin bottoms out at -3.6, the seabed top is SEABED_Y = -4).
+    const seaMinX = SEA_EDGE_X - 2 * S;
+    const seaMaxX = SEA_EAST_X;
+    world.createCollider(RAPIER.ColliderDesc.cuboid((seaMaxX - seaMinX) / 2, FAR_LAND_THICKNESS, S).setTranslation((seaMinX + seaMaxX) / 2, SEABED_Y - FAR_LAND_THICKNESS, 0).setFriction(FAR_LAND_FRICTION), body);
     return rects.map((r) =>
       world.createCollider(
         RAPIER.ColliderDesc.cuboid((r.maxX - r.minX) / 2, FAR_LAND_THICKNESS, (r.maxZ - r.minZ) / 2)

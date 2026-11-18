@@ -1,12 +1,12 @@
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 import { createValueNoise, fbm, smoothstep } from './noise';
-import { BASIN, MOUNTAIN, WATER_Y, basinHeight, mountainHeight, carvePaths } from './forest_map';
+import { BASIN, MOUNTAIN, WATER_Y, basinHeight, mountainHeight, bluffHeight, carvePaths } from './forest_map';
 
 // *** TERRAIN SETTINGS ***
-// Field base level is y = FIELD_CENTER.y. Center x = -100 with size 160 makes the +x edge touch the ground edge (x = -20) from script.js.
-export const FIELD_CENTER    = { x: -100, y: 0, z: 0 };
-export const FIELD_SIZE      = { x: 160, z: 160 };
+// Field base level is y = FIELD_CENTER.y. Center x = -60 with size 240 makes the field span x -180..60, so it covers the start ground and the oval meadow east of the old edge (x = -20).
+export const FIELD_CENTER    = { x: -60, y: 0, z: 0 };
+export const FIELD_SIZE      = { x: 240, z: 160 };
 const FIELD_CELL             = 1;         // world units per terrain grid cell (smaller = smoother, heavier)
 const FIELD_FRICTION         = 0.5;
 const FIELD_ROUGHNESS        = 1.0;
@@ -14,6 +14,7 @@ const FIELD_ROUGHNESS        = 1.0;
 // Procedural meadow hills (fade to zero at the ground edge and into the sea basin; paths flatten them)
 const HILL_AMPLITUDE         = 2.5;       // max hill height (world units); 0 = flat
 const HILL_WAVELENGTH        = 45;        // world units between hill centers; smaller = more, narrower hills
+const HILL_ORIGIN            = { x: -100, z: 0 }; // where the hill noise starts (the old field center): keeps the existing hills in place
 const HILL_OCTAVES           = 3;         // noise layers; more = bumpier detail
 const HILL_SEED              = 21;
 const HILL_NOISE_MIN         = 0.5;       // noise below this stays flat (raise for fewer hills)
@@ -78,7 +79,8 @@ export class Terrain {
     const { hillAmplitude, hillWavelength } = this.settings;
     if (hillAmplitude <= 0) return 0;
     const wx = FIELD_CENTER.x + lx;
-    const n = fbm(this._noise, lx / hillWavelength, lz / hillWavelength, HILL_OCTAVES);
+    // Noise is sampled from a fixed origin, so moving the field center does not reshuffle the hills that already exist
+    const n = fbm(this._noise, (wx - HILL_ORIGIN.x) / hillWavelength, (FIELD_CENTER.z + lz - HILL_ORIGIN.z) / hillWavelength, HILL_OCTAVES);
     const hill = smoothstep(HILL_NOISE_MIN, HILL_NOISE_MAX, n);
     const edgeRamp = smoothstep(0, HILL_FLAT_MARGIN, this.seamX - wx) * smoothstep(0, HILL_FLAT_MARGIN, FIELD_SIZE.z / 2 - Math.abs(lz)); // flat at the ground edge and at the north / south edges (they meet the lowland)
     const basinFade = 1 + basinHeight(wx) / BASIN.depth; // 1 on land, 0 at the bottom of the sea basin
@@ -90,7 +92,7 @@ export class Terrain {
   relHeight(lx, lz) {
     const wx = FIELD_CENTER.x + lx;
     const wz = FIELD_CENTER.z + lz;
-    return carvePaths(this.hills(lx, lz) + mountainHeight(wx, wz) + basinHeight(wx), wx, wz);
+    return carvePaths(this.hills(lx, lz) + mountainHeight(wx, wz) + basinHeight(wx) + bluffHeight(wx, wz), wx, wz);
   }
 
   /** World-space terrain surface height (y) at world x, z. */
